@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Chris Braun (cryzed) <cryzed@googlemail.com>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""
+Insert login information using Bitwarden CLI and a dmenu-compatible application
+(e.g. dmenu, rofi -dmenu, ...).
+"""
+
+USAGE = """The domain of the site has to be in the name of the Bitwarden entry, for example: "github.com/cryzed" or
+"websites/github.com".  The login information is inserted by emulating key events using qutebrowser's fake-key command in this manner:
+[USERNAME]<Tab>[PASSWORD], which is compatible with almost all login forms.
+
+If enabled, with the `--totp` flag, it will also move the TOTP code to the
+clipboard, much like the Firefox add-on.
+
+You must log into Bitwarden CLI using `bw login` prior to use of this script.
+The session key will be stored using keyctl for the number of seconds passed to
+the --auto-lock option.
+
+To use in qutebrowser, run: `spawn --userscript qute-bitwarden`
+"""
+
+EPILOG = """Dependencies: tldextract (Python 3 module), pyperclip (optional
+Python module, used for TOTP codes), Bitwarden CLI (1.7.4 is known to work
+but older versions may well also work)
+
+WARNING: The login details are viewable as plaintext in qutebrowser's debug log
+(qute://log) and might be shared if you decide to submit a crash report!"""
+
+import argparse
+import enum
+import functools
+import os
+import shlex
+import subprocess
+import sys
+import json
+from urllib.parse import urlparse
+import socket
+
+# --- DAEMON CONFIGURATION ---
+SOCKET_PATH = "/tmp/bw.sock"
+TOKEN_PATH = "/tmp/bw_token"
+
+argument_parser = argparse.ArgumentParser(
+    description=__doc__,
+    usage=USAGE,
+    epilog=EPILOG,
+)
+argument_parser.add_argument('url', nargs='?', default=os.getenv('QUTE_URL'))
+argument_parser.add_argument('--dmenu-invocation', '-d', default='rofi -dmenu -i -p Bitwarden',
+                             help='Invocation used to execute a dmenu-provider')
+argument_parser.add_argument('--password-prompt-invocation', '-p', default='rofi -dmenu -p "Master Password" -password -lines 0',
+                             help='Invocation used to prompt the user for their Bitwarden password')
+argument_parser.add_argument('--no-insert-mode', '-n', dest='insert_mode', action='store_false',
+                             help="Don't automatically enter insert mode")
+argument_parser.add_argument('--totp', '-t', action='store_true',
+                             help="Copy TOTP key to clipboard")
+argument_parser.add_argument('--io-encoding', '-i', default='UTF-8',
+                             help='Encoding used to communicate with subprocesses')
+argument_parser.add_argument('--merge-candidates', '-m', action='store_true',
+                             help='Merge pass candidates for fully-qualified and registered domain name')
+argument_parser.add_argument('--auto-lock', type=int, default=900,
+                             help='Automatically lock the vault after this many seconds')
+group = argument_parser.add_mutually_exclusive_group()
+group.add_argument('--username-only', '-e',
+                   action='store_true', help='Only insert username')
+group.add_argument('--password-only', '-w',
+                   action='store_true', help='Only insert password')
+group.add_argument('--totp-only', '-T',
+                   action='store_true', help='Only insert totp code')
+
+stderr = functools.partial(print, file=sys.stderr)
+
+
+class ExitCodes(enum.IntEnum):
+    SUCCESS = 0
+    FAILURE = 1
+    # 1 is automatically used if Python throws an exception
+    NO_PASS_CANDIDATES = 2
+    COULD_NOT_MATCH_USERNAME = 3
+    COULD_NOT_MATCH_PASSWORD = 4
+
+
+def qute_command(command):
+    with open(os.environ['QUTE_FIFO'], 'w') as fifo:
+        fifo.write(command + '\n')
+        fifo.flush()
+
+
+def ask_password(password_prompt_invocation):
+    process = subprocess.run(
+        shlex.split(password_prompt_invocation),
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    if process.returncode > 0:
+        raise Exception('Could not unlock vault')
+    master_pass = process.stdout.strip()
+    return subprocess.check_output(
+        ['bw', 'unlock', '--raw', '--passwordenv', 'BW_MASTERPASS'],
+        env={**os.environ, 'BW_MASTERPASS': master_pass},
+        text=True,
+    ).strip()
+
+
+def get_session_key(auto_lock, password_prompt_invocation):
+    if auto_lock == 0:
+        subprocess.call(['keyctl', 'purge', 'user', 'bw_session'])
+        return ask_password(password_prompt_invocation)
+    else:
+        process = subprocess.run(
+            ['keyctl', 'request', 'user', 'bw_session'],
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        key_id = process.stdout.strip()
+        if process.returncode > 0:
+            session = ask_password(password_prompt_invocation)
+            if not session:
+                raise Exception('Could not unlock vault')
+            key_id = subprocess.check_output(
+                ['keyctl', 'add', 'user', 'bw_session', session, '@u'],
+                text=True,
+            ).strip()
+
+        if auto_lock > 0:
+            subprocess.call(['keyctl', 'timeout', str(key_id), str(auto_lock)])
+        return subprocess.check_output(
+            ['keyctl', 'pipe', str(key_id)],
+            text=True,
+        ).strip()
+
+
+def pass_(domain, encoding, auto_lock, password_prompt_invocation):
+    # Ensure we are using a clean hostname for matching
+    clean_domain = domain.split('/')[0].split(':')[0]
+
+    # --- 1. TRY THE DAEMON FIRST ---
+    try:
+        if os.path.exists(TOKEN_PATH) and os.path.exists(SOCKET_PATH):
+            with open(TOKEN_PATH, "r") as f:
+                token = f.read().strip()
+
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(0.5)
+            client.connect(SOCKET_PATH)
+            client.sendall(f"{token}:{clean_domain}".encode())
+
+            response = b""
+            while True:
+                chunk = client.recv(4096)
+                if not chunk: break
+                response += chunk
+
+            if response:
+                decoded = json.loads(response.decode())
+                # Return the data and a flag indicating we used the daemon
+                if decoded: return decoded, True
+    except Exception:
+        pass
+
+    # --- 2. FALLBACK TO CLI ---
+    session_key = get_session_key(auto_lock, password_prompt_invocation)
+    process = subprocess.run(
+        ['bw', 'list', 'items', '--nointeraction', '--session', session_key, '--url', clean_domain],
+        capture_output=True,
+        text=True
+    )
+
+    if process.returncode != 0:
+        return [], False
+
+    try:
+        items = json.loads(process.stdout)
+        return items, False
+    except (json.JSONDecodeError, TypeError):
+        return [], False
+
+def get_totp_code(selection_id, session_key, arguments):
+    # Try once with the existing session_key
+    process = subprocess.run(
+        ['bw', 'get', 'totp', '--nointeraction', '--session', session_key, selection_id],
+        capture_output=True,
+        text=True
+    )
+
+    # If it failed because the vault is locked, we need to re-authenticate
+    if process.returncode != 0 and "vault is locked" in process.stderr.lower():
+        # Clear the stale key from the kernel keyring
+        subprocess.run(['keyctl', 'purge', 'user', 'bw_session'])
+
+        # Force a new password prompt and get a fresh key
+        new_session = get_session_key(arguments.auto_lock, arguments.password_prompt_invocation)
+
+        # Retry the command with the new session
+        process = subprocess.run(
+            ['bw', 'get', 'totp', '--nointeraction', '--session', new_session, selection_id],
+            capture_output=True,
+            text=True
+        )
+
+    return process.stdout.strip()
+
+
+def dmenu(items, invocation, encoding):
+    command = shlex.split(invocation)
+    process = subprocess.run(command, input='\n'.join(
+        items).encode(encoding), stdout=subprocess.PIPE)
+    return process.stdout.decode(encoding).strip()
+
+
+def fake_key_raw(text):
+    escaped_text = "".join([f'\\{c}' if c != ' ' else '" "' for c in text])
+    qute_command(f'fake-key {escaped_text}')
+
+
+def main(arguments):
+    if not arguments.url:
+        argument_parser.print_help()
+        return ExitCodes.FAILURE
+
+    parsed = urlparse(arguments.url)
+    target = parsed.hostname or arguments.url.split('/')[0].split(':')[0]
+
+    session_key = None
+
+    candidates, used_daemon = pass_(
+        target,
+        arguments.io_encoding,
+        arguments.auto_lock,
+        arguments.password_prompt_invocation,
+    )
+
+    if not candidates:
+        stderr('No pass candidates for URL {!r} found!'.format(arguments.url))
+        return ExitCodes.NO_PASS_CANDIDATES
+
+    # --- SELECTION LOGIC ---
+    if len(candidates) == 1:
+        selection = candidates[0]
+    else:
+        choices = [
+            '{:s} | {:s}'.format(
+                c.get('name') or "Unknown",
+                (c.get('login') or {}).get('username') or "[No Username]"
+            )
+            for c in candidates
+        ]
+        choice = dmenu(choices, arguments.dmenu_invocation, arguments.io_encoding)
+        if not choice: return ExitCodes.SUCCESS
+
+        choice_tokens = choice.split('|')
+        choice_name = choice_tokens[0].strip()
+        choice_username = choice_tokens[1].strip()
+
+        selection = next((c for c in candidates
+                          if (c.get('name') or "Unknown") == choice_name
+                          and ((c.get('login') or {}).get('username') or "[No Username]") == choice_username),
+                         None)
+
+    if not selection: return ExitCodes.SUCCESS
+
+    if (arguments.totp or arguments.totp_only):
+        session_key = get_session_key(arguments.auto_lock, arguments.password_prompt_invocation)
+
+# --- INSERTION LOGIC ---
+    if arguments.totp_only:
+        import pyperclip
+        pyperclip.copy(get_totp_code(selection['id'], session_key, arguments))
+
+        return ExitCodes.SUCCESS
+
+    # If not TOTP-only, proceed with credentials
+    username = selection['login'].get('username', '')
+    password = selection['login'].get('password', '')
+
+    if arguments.username_only:
+        fake_key_raw(username)
+    elif arguments.password_only:
+        fake_key_raw(password)
+    else:
+        u_esc = "".join([f'\\{c}' if c != ' ' else '" "' for c in username])
+        p_esc = "".join([f'\\{c}' if c != ' ' else '" "' for c in password])
+
+        qute_command('hint inputs normal')
+
+        import glob
+        from time import sleep
+
+        sleep(0.5)
+
+        def wait_for_keypress():
+            # Find the most likely keyboard device
+            devices = glob.glob('/dev/input/by-id/*kbd*')
+            if not devices:
+                sleep(1.0) # Fallback if we can't access hardware
+                return
+            with open(devices[0], 'rb') as f:
+                f.read(24)
+
+        wait_for_keypress()
+
+        sleep(0.05)
+        qute_command(f'fake-key {u_esc}<Tab>{p_esc}')
+
+
+    # Optional: Copy TOTP to clipboard if the flag was set during a normal login
+    if arguments.totp and selection['login'].get('totp'):
+        try:
+            import pyperclip
+            pyperclip.copy(get_totp_code(selection['id'], session_key, arguments))
+        except ImportError:
+            stderr("Warning: pyperclip not found. Could not copy TOTP to clipboard.")
+
+    if arguments.insert_mode:
+        qute_command('mode-enter insert')
+
+    return ExitCodes.SUCCESS
+
+if __name__ == '__main__':
+    arguments = argument_parser.parse_args()
+    sys.exit(main(arguments))
