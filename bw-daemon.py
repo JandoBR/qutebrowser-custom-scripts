@@ -112,8 +112,7 @@ def sync_worker():
                     vault_data = json.loads(raw_new_data)
 
                 logging.info(f"Sync successful. Items in memory: {len(vault_data)}")
-                subprocess.run(['notify-send', 'Bitwarden', 'Vault synced successfully'])
-
+                
         except Exception as e:
             logging.exception("An unexpected error occurred during sync_worker loop")
 
