@@ -107,8 +107,7 @@ config.set('content.headers.accept_language', '', 'https://matchmaker.krunker.io
 # increased compatibility.  Note that the value read from JavaScript is
 # always the global value.
 # Type: FormatString
-config.set('content.headers.user_agent', 'Mozilla/5.0 ({os_info}; rv:145.0) Gecko/20100101 Firefox/145.0', 'https://accounts.google.com/*')
-
+c.content.headers.user_agent = 'Mozilla/5.0 ({os_info}) AppleWebKit/{webkit_version} (KHTML, like Gecko) {upstream_browser_key}/{upstream_browser_version} Safari/{webkit_version}'
 # User agent to send.  The following placeholders are defined:  *
 # `{os_info}`: Something like "X11; Linux x86_64". * `{webkit_version}`:
 # The underlying WebKit version (set to a fixed value   with
@@ -124,8 +123,7 @@ config.set('content.headers.user_agent', 'Mozilla/5.0 ({os_info}; rv:145.0) Geck
 # increased compatibility.  Note that the value read from JavaScript is
 # always the global value.
 # Type: FormatString
-config.set('content.headers.user_agent', 'Mozilla/5.0 ({os_info}) AppleWebKit/{webkit_version} (KHTML, like Gecko) {qt_key}/{qt_version} {upstream_browser_key}/{upstream_browser_version_short} Safari/{webkit_version}', 'https://gitlab.gnome.org/*')
-
+config.set('content.headers.user_agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'https://accounts.google.com/*')
 # Load images automatically in web pages.
 # Type: Bool
 config.set('content.images', True, 'chrome-devtools://*')
@@ -159,10 +157,66 @@ config.set('content.local_content_can_access_remote_urls', True, 'file:///home/j
 config.set('content.local_content_can_access_file_urls', False, 'file:///home/jandobr/.local/share/qutebrowser/userscripts/*')
 
 
+
+
+# =============================================
+# ================ USER CONFIG ================
+# =============================================
+
+# === Theme Config ===
+import catppuccin
+
+# valid options are 'mocha', 'macchiato', 'frappe', and 'latte'
+# last argument (optional, default is False): enable the plain look for the menu rows
+catppuccin.setup(c, 'mocha', False)
+
+# === Session ===
 c.auto_save.session = True
 
-c.colors.webpage.darkmode.enabled = True
+c.colors.webpage.preferred_color_scheme = "dark"
+#c.colors.webpage.darkmode.enabled = True
 
+c.content.autoplay = False
+
+c.content.javascript.clipboard = "access"
+
+c.scrolling.smooth = True
+
+c.statusbar.show = "never"
+
+# === Fonts ===
+c.fonts.default_family = "JetBrainsMono Nerd Font, monospace"
+c.fonts.default_size = "10pt"
+
+# === Tabs ===
+c.tabs.padding = {"top": 8, "bottom": 8, "left": 12, "right": 12}
+c.tabs.indicator.width = 3
+c.tabs.favicons.scale = 1.2
+c.tabs.title.alignment = "center"
+#c.tabs.position = "right"
+#c.tabs.show = "switching"
+c.tabs.show = "multiple"
+c.tabs.show_switching_delay = 1500
+c.tabs.select_on_remove = "last-used"
+c.tabs.new_position.unrelated = "next"
+# === URL Settings ===
+c.url.start_pages = ["https://home.pixxula.uk/"]
+c.url.default_page = "https://home.pixxula.uk/"
 c.url.searchengines = {"DEFAULT": "https://search.pixxula.uk/?q={}"}
 
+# === Binds ===
 config.bind('<Ctrl-p>', 'spawn --userscript qute-bitwarden')
+config.bind('<Ctrl-o>', 'spawn --userscript qute-bitwarden --password-only')
+
+config.unbind('<Ctrl-V>')
+
+config.unbind('J')
+config.unbind('K')
+config.bind('J', 'tab-prev')
+config.bind('K', 'tab-next')
+
+config.bind('ss', 'cmd-set-text -s :session-save --current')
+config.bind('sl', 'cmd-set-text -s :session-load --clear ')
+
+config.bind('xx', 'config-cycle tabs.show multiple never')
+
