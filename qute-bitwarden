@@ -281,7 +281,32 @@ def main(arguments):
     if arguments.username_only:
         fake_key_raw(username)
     elif arguments.password_only:
-        fake_key_raw(password)
+        p_esc = "".join([f'\\{c}' if c != ' ' else '" "' for c in password])
+
+        qute_command('hint inputs normal')
+
+        import glob
+        from time import sleep
+
+        sleep(0.5)
+
+        def wait_for_keypress():
+            # Find the most likely keyboard device
+            devices = glob.glob('/dev/input/by-id/*kbd*')
+            if not devices:
+                sleep(1.0) # Fallback if we can't access hardware
+                return
+            with open(devices[0], 'rb') as f:
+                f.read(24)
+
+        wait_for_keypress()
+
+        sleep(0.05)
+        qute_command(f'fake-key {p_esc}')
+
+        sleep(0.05)
+        qute_command('cmd-set-text : ;; fake-key -g <Escape>')
+
     else:
         u_esc = "".join([f'\\{c}' if c != ' ' else '" "' for c in username])
         p_esc = "".join([f'\\{c}' if c != ' ' else '" "' for c in password])
@@ -307,6 +332,8 @@ def main(arguments):
         sleep(0.05)
         qute_command(f'fake-key {u_esc}<Tab>{p_esc}')
 
+        sleep(0.05)
+        qute_command('cmd-set-text : ;; fake-key -g <Escape>')
 
     # Optional: Copy TOTP to clipboard if the flag was set during a normal login
     if arguments.totp and selection['login'].get('totp'):
