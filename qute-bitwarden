@@ -292,7 +292,7 @@ def main(arguments):
 
         def wait_for_keypress():
             # Find the most likely keyboard device
-            devices = glob.glob('/dev/input/by-id/*kbd*')
+            devices = glob.glob('/dev/input/by-id/*CORNE*kbd*')
             if not devices:
                 sleep(1.0) # Fallback if we can't access hardware
                 return
@@ -320,7 +320,7 @@ def main(arguments):
 
         def wait_for_keypress():
             # Find the most likely keyboard device
-            devices = glob.glob('/dev/input/by-id/*kbd*')
+            devices = glob.glob('/dev/input/by-id/*CORNE*kbd*')
             if not devices:
                 sleep(1.0) # Fallback if we can't access hardware
                 return
